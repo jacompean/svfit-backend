@@ -18,10 +18,8 @@ const origins = (process.env.FRONTEND_ORIGINS || "")
 
 app.use(cors({
   origin: function(origin, cb) {
-    // In production, block requests without Origin to reduce abuse.
-    // In local dev, allow tools like curl/postman.
+    // Allow requests without Origin (e.g., direct browser navigation, curl/postman).
     if (!origin) {
-      if ((process.env.NODE_ENV || '').toLowerCase() === 'production') return cb(new Error('Not allowed by CORS'));
       return cb(null, true);
     }
     if (origins.length === 0) return cb(null, true);
