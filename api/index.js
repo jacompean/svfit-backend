@@ -18,10 +18,8 @@ const origins = (process.env.FRONTEND_ORIGINS || "")
 
 app.use(cors({
   origin: function(origin, cb) {
-    // In production, block requests without Origin to reduce abuse.
-    // In local dev, allow tools like curl/postman.
+    // Allow requests without Origin (e.g., direct browser navigation, curl/postman).
     if (!origin) {
-      if ((process.env.NODE_ENV || '').toLowerCase() === 'production') return cb(new Error('Not allowed by CORS'));
       return cb(null, true);
     }
     if (origins.length === 0) return cb(null, true);
@@ -140,6 +138,141 @@ app.get("/api/members", requireAuth, requireRole(["admin", "coach"]), async (req
     params
   );
   res.json({ ok: true, members: r.rows });
+});
+
+// ---- MEMBERSHIPS / PLANS ----
+app.get("/api/plans", requireAuth, requireRole(["admin", "coach"]), async (req, res) => {
+  const onlyActive = (req.query.active || "").toString().toLowerCase() === "true";
+  const where = onlyActive ? "where is_active = true" : "";
+  const r = await query(
+    `select id, name, price_mxn, duration_days, is_active, created_at
+     from membership_plans
+     ${where}
+     order by is_active desc, price_mxn asc, name asc`
+  );
+  res.json({ ok: true, plans: r.rows });
+});
+
+app.post("/api/plans", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const { name, price_mxn, duration_days, is_active } = req.body || {};
+  if (!name || price_mxn === undefined || duration_days === undefined) {
+    return jsonError(res, 400, "name, price_mxn, duration_days required");
+  }
+  if (Number(duration_days) <= 0) return jsonError(res, 400, "duration_days must be > 0");
+  if (Number(price_mxn) < 0) return jsonError(res, 400, "price_mxn must be >= 0");
+
+  const r = await query(
+    `insert into membership_plans (name, price_mxn, duration_days, is_active)
+     values ($1, $2, $3, $4)
+     returning id, name, price_mxn, duration_days, is_active, created_at`,
+    [
+      String(name).trim(),
+      Number(price_mxn),
+      Number(duration_days),
+      is_active === undefined ? true : Boolean(is_active)
+    ]
+  );
+  res.status(201).json({ ok: true, plan: r.rows[0] });
+});
+
+app.put("/api/plans/:id", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const id = req.params.id;
+  const { name, price_mxn, duration_days, is_active } = req.body || {};
+  if (price_mxn !== undefined && Number(price_mxn) < 0) return jsonError(res, 400, "price_mxn must be >= 0");
+  if (duration_days !== undefined && Number(duration_days) <= 0) return jsonError(res, 400, "duration_days must be > 0");
+
+  const r = await query(
+    `update membership_plans
+     set name = coalesce($2, name),
+         price_mxn = coalesce($3, price_mxn),
+         duration_days = coalesce($4, duration_days),
+         is_active = coalesce($5, is_active)
+     where id = $1
+     returning id, name, price_mxn, duration_days, is_active, created_at`,
+    [
+      id,
+      name ? String(name).trim() : null,
+      price_mxn === undefined ? null : Number(price_mxn),
+      duration_days === undefined ? null : Number(duration_days),
+      is_active === undefined ? null : Boolean(is_active)
+    ]
+  );
+  if (r.rowCount === 0) return jsonError(res, 404, "Plan not found");
+  res.json({ ok: true, plan: r.rows[0] });
+});
+
+app.delete("/api/plans/:id", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const id = req.params.id;
+  const r = await query("delete from membership_plans where id=$1 returning id", [id]);
+  if (r.rowCount === 0) return jsonError(res, 404, "Plan not found");
+  res.json({ ok: true });
+});
+
+app.get("/api/members/:id/memberships", requireAuth, requireRole(["admin", "coach"]), async (req, res) => {
+  const memberId = req.params.id;
+  const r = await query(
+    `select mm.id, mm.member_id, mm.plan_id, mm.start_date, mm.end_date, mm.status,
+            p.name as plan_name, p.price_mxn, p.duration_days
+     from member_memberships mm
+     join membership_plans p on p.id = mm.plan_id
+     where mm.member_id = $1
+     order by mm.start_date desc`,
+    [memberId]
+  );
+  res.json({ ok: true, memberships: r.rows });
+});
+
+app.post("/api/members/:id/memberships", requireAuth, requireRole(["admin", "coach"]), async (req, res) => {
+  const memberId = req.params.id;
+  const { plan_id, start_date, end_date, status } = req.body || {};
+  if (!plan_id || !start_date) return jsonError(res, 400, "plan_id and start_date required");
+
+  const plan = await query("select duration_days from membership_plans where id=$1 and is_active=true", [plan_id]);
+  if (plan.rowCount === 0) return jsonError(res, 404, "Active plan not found");
+
+  const computedEnd = end_date
+    ? String(end_date)
+    : null;
+
+  const r = await query(
+    `insert into member_memberships (member_id, plan_id, start_date, end_date, status)
+     values ($1, $2, $3::date, coalesce($4::date, ($3::date + ($5 || ' days')::interval)::date), $6)
+     returning id, member_id, plan_id, start_date, end_date, status, created_at`,
+    [
+      memberId,
+      plan_id,
+      String(start_date),
+      computedEnd,
+      Number(plan.rows[0].duration_days),
+      status ? String(status) : "active"
+    ]
+  );
+  res.status(201).json({ ok: true, membership: r.rows[0] });
+});
+
+app.put("/api/memberships/:id", requireAuth, requireRole(["admin", "coach"]), async (req, res) => {
+  const id = req.params.id;
+  const { start_date, end_date, status } = req.body || {};
+  if (start_date && end_date && new Date(start_date) > new Date(end_date)) {
+    return jsonError(res, 400, "end_date must be >= start_date");
+  }
+
+  const r = await query(
+    `update member_memberships
+     set start_date = coalesce($2::date, start_date),
+         end_date = coalesce($3::date, end_date),
+         status = coalesce($4, status)
+     where id = $1
+     returning id, member_id, plan_id, start_date, end_date, status, created_at`,
+    [
+      id,
+      start_date ? String(start_date) : null,
+      end_date ? String(end_date) : null,
+      status ? String(status) : null
+    ]
+  );
+  if (r.rowCount === 0) return jsonError(res, 404, "Membership not found");
+  res.json({ ok: true, membership: r.rows[0] });
 });
 
 app.post("/api/members", requireAuth, requireRole(["admin", "coach"]), async (req, res) => {
