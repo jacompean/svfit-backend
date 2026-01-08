@@ -1,48 +1,59 @@
 # SVFIT Backend (Vercel + Neon)
 
-Backend serverless con Express desplegable en Vercel y Postgres en Neon.
+Backend serverless para SVFIT: autenticación, roles (admin/staff/coach/member), miembros, membresías, asistencia, pagos, inventario, ventas y corte de caja.
 
 ## Requisitos
-- Node.js 18+ (para desarrollo local opcional)
-- Base de datos Postgres en Neon (DB: `SVFIT`)
+- Vercel (Node 20)
+- Neon (Postgres)
 
 ## Variables de entorno (Vercel)
-- `DATABASE_URL` (Neon connection string, con `sslmode=require`)
-- `JWT_SECRET` (cadena fuerte)
-- `FRONTEND_ORIGINS` (por ejemplo: `https://svfit.vercel.app,http://localhost:5173`)
+- DATABASE_URL = connection string de Neon (incluye sslmode=require)
+- JWT_SECRET = cadena larga (mínimo 32 chars)
+- FRONTEND_ORIGINS = lista separada por comas. Ej:
+  - https://svfit.vercel.app,*.vercel.app,http://localhost:5173
+- SETUP_KEY = (temporal) clave para ejecutar setup inicial (BORRAR después)
 
-> No uses `vercel.json` para declarar envs tipo `@SECRET`. En su lugar, configúralas desde Vercel Dashboard.
+## Instalación en Neon (SQL)
+1) En Neon -> SQL Editor ejecuta:
+   - sql/001_schema.sql
 
-## Inicialización de base de datos (sin "init")
-En Neon (SQL Editor) ejecuta:
-1) `sql/001_schema.sql`
-2) `sql/002_seed.sql`
+## Setup inicial (sin usar SQL de seed)
+1) En Vercel (backend) agrega SETUP_KEY (una clave que tú elijas).
+2) Haz Deploy/Redeploy.
+3) Ejecuta el setup con un POST:
 
-Usuarios demo:
-- admin@svfit.mx / Admin123!
-- coach@svfit.mx / Coach123!
+   POST https://svfit-backend.vercel.app/api/setup
+   Body JSON:
+   {
+     "setupKey": "TU_SETUP_KEY"
+   }
+
+4) Si responde ok=true, ve a Vercel y **BORRA** SETUP_KEY (por seguridad).
+5) Inicia sesión (credenciales demo, cámbialas):
+   - admin@svfit.mx / Admin123!
+   - staff@svfit.mx / Staff123!
+   - coach@svfit.mx / Coach123!
+   - member@svfit.mx / Member123!
 
 ## Endpoints principales
-- `GET /api/health`
-- `POST /api/auth/login`
-- `POST /api/auth/register` (crea usuario con rol `member`)
-- `GET /api/me`
-- `GET /api/dashboard/summary` (admin/coach)
-- `GET/POST/PUT/DELETE /api/members` (delete solo admin)
-- `POST /api/attendance/checkin`
-- `GET /api/attendance`
-- `POST /api/payments` / `GET /api/payments`
-- `GET /api/classes`
-- `POST /api/classes`
-- `POST /api/classes/:id/enroll`
+- GET /api/health
+- POST /api/auth/login
+- GET /api/me
 
-## Dev local (opcional)
-```bash
-npm install
-cp .env.example .env
-npm run dev
-```
+Admin/Staff:
+- CRUD usuarios: /api/users
+- CRUD miembros (crear/editar): /api/members
+- Planes y membresías: /api/plans, /api/members/:id/membership, /api/memberships/expiring
+- Inventario: /api/products, /api/products/:id/adjust
+- Ventas: /api/sales, /api/sales/summary
+- Corte de caja: /api/cash-sessions/open, /api/cash-sessions/:id/close, /api/cash-sessions/:id/summary
 
+Coach:
+- Ver miembros: GET /api/members
+- Asistencia: POST /api/members/:id/checkin
 
-## Nota de seguridad
-En `NODE_ENV=production`, el backend bloquea requests sin header `Origin` (para que no sea fácil invocarlo desde scripts externos). Para pruebas con Postman/curl, usa `NODE_ENV=development` o agrega un Origin permitido.
+Member:
+- Resumen: GET /api/member/summary
+- Membresía: GET /api/member/membership
+- Pagos: GET /api/member/payments
+- Asistencia: GET /api/member/attendance
