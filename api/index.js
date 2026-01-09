@@ -200,4 +200,160 @@ app.post(["/admin/setup", "/api/admin/setup"], async (req, res) => {
     const code = String(tenantCode || "").toUpperCase();
     if (code.length !== 2) return json(res, 400, { ok: false, error: "tenantCode must be 2 letters (e.g. SV)" });
 
-    if (!tenantName) return json(res, 400, { ok: f
+    if (!tenantName) return json(res, 400, { ok: false, error: "tenantName is required" });
+
+    const domain = cleanDomain(tenantDomain);
+    if (!domain) return json(res, 400, { ok: false, error: "tenantDomain is required (e.g. svfit.vercel.app)" });
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // Upsert tenant
+      const upTenant = await client.query(
+        `
+        INSERT INTO tenants (code, name, accent_color, is_active, next_seq)
+        VALUES ($1, $2, '#39FF14', true, 1)
+        ON CONFLICT (code)
+        DO UPDATE SET name = EXCLUDED.name, is_active=true
+        RETURNING *
+        `,
+        [code, tenantName]
+      );
+      const tenant = upTenant.rows[0];
+
+      // Upsert domain
+      await client.query(
+        `
+        INSERT INTO tenant_domains (tenant_id, domain, is_active)
+        VALUES ($1, $2, true)
+        ON CONFLICT (tenant_id, domain)
+        DO UPDATE SET is_active=true
+        `,
+        [tenant.id, domain]
+      );
+
+      // Create/Update global admin
+      const adminHash = await bcrypt.hash(String(adminPassword), 10);
+      await client.query(
+        `
+        INSERT INTO users (id_code, role, password_hash, tenant_id, is_active)
+        VALUES ('admin', 'admin', $1, NULL, true)
+        ON CONFLICT (id_code)
+        DO UPDATE SET role='admin', password_hash=EXCLUDED.password_hash, is_active=true
+        `,
+        [adminHash]
+      );
+
+      // Create tenant admin id_code using next_seq (XX0001)
+      // Get current next_seq
+      const seqRow = await client.query(`SELECT next_seq FROM tenants WHERE id=$1 FOR UPDATE`, [tenant.id]);
+      const seq = Number(seqRow.rows[0]?.next_seq || 1);
+      const adminTenantId = `${code}${String(seq).padStart(4, "0")}`;
+      const tempPassword = "Admin123!";
+      const tempHash = await bcrypt.hash(tempPassword, 10);
+
+      await client.query(
+        `
+        INSERT INTO users (id_code, role, password_hash, tenant_id, is_active)
+        VALUES ($1, 'admin_tenant', $2, $3, true)
+        ON CONFLICT (id_code)
+        DO UPDATE SET role='admin_tenant', tenant_id=$3, password_hash=$2, is_active=true
+        `,
+        [adminTenantId, tempHash, tenant.id]
+      );
+
+      // Increment next_seq
+      await client.query(`UPDATE tenants SET next_seq = $1 WHERE id=$2`, [seq + 1, tenant.id]);
+
+      // Seed membership plans (requires membership_plans table already created)
+      await client.query(
+        `
+        INSERT INTO membership_plans (tenant_id, code, name, description, is_active)
+        VALUES
+          ($1, 'STD', 'Membresía estándar', 'Acceso general', true),
+          ($1, 'PER', 'Membresía con personalizado', 'Incluye entrenamiento personalizado', true),
+          ($1, 'TEEN', 'Membresía teens', 'Soft rule: advertencia de horario', true)
+        ON CONFLICT (tenant_id, code)
+        DO UPDATE SET name=EXCLUDED.name, description=EXCLUDED.description, is_active=true
+        `,
+        [tenant.id]
+      );
+
+      await client.query("COMMIT");
+
+      return json(res, 200, {
+        ok: true,
+        tenant: { id: tenant.id, code: tenant.code, name: tenant.name, domain },
+        admin: { id_code: "admin" },
+        adminTenant: { id_code: adminTenantId, tempPassword },
+        note: "IMPORTANT: Delete SETUP_KEY from Vercel env vars after setup.",
+      });
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error("setup error:", err);
+    return json(res, 500, { ok: false, error: "Setup failed", detail: String(err.message || err) });
+  }
+});
+
+// Login (already supports both /auth/login and /api/auth/login)
+app.post(["/auth/login", "/api/auth/login"], async (req, res) => {
+  try {
+    const { identifier, password } = req.body || {};
+    if (!identifier || !password) return json(res, 400, { ok: false, error: "identifier and password required" });
+
+    const id = String(identifier).trim();
+
+    const r = await pool.query(
+      `SELECT id, id_code, role, tenant_id, password_hash, is_active
+       FROM users
+       WHERE id_code=$1
+       LIMIT 1`,
+      [id]
+    );
+
+    if (r.rowCount === 0) return json(res, 401, { ok: false, error: "Invalid credentials" });
+
+    const u = r.rows[0];
+    if (u.is_active === false) return json(res, 403, { ok: false, error: "User disabled" });
+
+    const ok = await bcrypt.compare(String(password), u.password_hash);
+    if (!ok) return json(res, 401, { ok: false, error: "Invalid credentials" });
+
+    // For non-global admin, require tenant resolved and matching
+    if (u.role !== "admin") {
+      if (!req.tenant) return json(res, 403, { ok: false, error: "Tenant not resolved for this domain" });
+      if (String(u.tenant_id) !== String(req.tenant.id)) {
+        return json(res, 403, { ok: false, error: "User does not belong to this tenant" });
+      }
+    }
+
+    const token = signToken({
+      sub: u.id_code,
+      role: u.role,
+      tenant_id: u.tenant_id || null,
+    });
+
+    return json(res, 200, {
+      ok: true,
+      token,
+      user: { id_code: u.id_code, role: u.role, tenant_id: u.tenant_id || null },
+      tenant: req.tenant ? { id: req.tenant.id, code: req.tenant.code, name: req.tenant.name } : null,
+    });
+  } catch (err) {
+    console.error("login error:", err);
+    return json(res, 500, { ok: false, error: "Login failed", detail: String(err.message || err) });
+  }
+});
+
+// Not found
+app.all("*", (req, res) => {
+  return json(res, 404, { ok: false, error: "Not found" });
+});
+
+module.exports = app;
