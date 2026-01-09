@@ -5,7 +5,7 @@ const { z } = require('zod');
 
 const { query } = require('../lib/db');
 const { requireAuth, requireRole } = require('../lib/auth');
-const { resolveTenantFromOrigin, normalizeDomain } = require('../lib/tenant');
+const { resolveTenantFromOrigin, resolveTenantFromCode, normalizeDomain } = require('../lib/tenant');
 const { pad4, parseIdCode } = require('../lib/utils');
 
 const app = express();
@@ -18,21 +18,28 @@ app.use(async (req, res, next) => {
     if (req.path === '/api/health') return next();
 
     const origin = req.headers.origin || '';
-    if (!origin) {
-      // Browser requests should have Origin; for safety, block in production
-      if ((process.env.NODE_ENV || 'production') === 'production') {
-        return res.status(403).json({ ok: false, error: 'CORS blocked: missing origin' });
-      }
-      return next();
+    const headerDomain = req.headers['x-tenant-domain'] || '';
+    const headerCode = req.headers['x-tenant-code'] || '';
+
+    let tenant = null;
+    let originDomain = '';
+
+    if (origin) {
+      tenant = await resolveTenantFromOrigin(origin);
+      originDomain = normalizeDomain(origin);
+    } else if (headerDomain) {
+      tenant = await resolveTenantFromOrigin(headerDomain);
+      originDomain = normalizeDomain(headerDomain);
+    } else if (headerCode) {
+      tenant = await resolveTenantFromCode(headerCode);
     }
 
-    const tenant = await resolveTenantFromOrigin(origin);
-    if (!tenant) {
+    if (origin && !tenant) {
       return res.status(403).json({ ok: false, error: 'CORS blocked: origin not configured' });
     }
 
-    req.tenant = tenant;
-    req.originDomain = normalizeDomain(origin);
+    req.tenant = tenant || null;
+    req.originDomain = originDomain || '';
     return next();
   } catch (e) {
     console.error(e);
@@ -761,7 +768,14 @@ app.post('/api/sales', requireAuth, requireRole(['admin','admin_tenant','staff',
 // ===== Member portal endpoints =====
 app.get('/api/member/summary', requireAuth, requireRole(['member']), async (req, res) => {
   const tenantId = req.user.tenant_id;
-  const mem = await query(`SELECT * FROM members WHERE user_id=$1 AND tenant_id=$2 LIMIT 1`, [req.user.uid, tenantId]);
+  const mem = await query(
+    `SELECT mem.*, u.id_code
+     FROM members mem
+     JOIN users u ON u.id = mem.user_id
+     WHERE mem.user_id = $1 AND mem.tenant_id = $2
+     LIMIT 1`,
+    [req.user.uid, tenantId]
+  );
   if (mem.rowCount === 0) return res.status(404).json({ ok:false, error:'Member profile not found' });
 
   const membership = await query(
@@ -777,7 +791,7 @@ app.get('/api/member/summary', requireAuth, requireRole(['member']), async (req,
 
   return res.json({
     ok:true,
-    member: { id: mem.rows[0].id, full_name: mem.rows[0].full_name, id_code: req.user.id_code },
+    member: { id: mem.rows[0].id, full_name: mem.rows[0].full_name, id_code: mem.rows[0].id_code },
     membership: membership.rows[0] || null,
     attendance_last_30_days: attendanceCount.rows[0].cnt
   });
