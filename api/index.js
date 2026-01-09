@@ -98,7 +98,8 @@ app.use(async (req, res, next) => {
 
     // Allow /api/health always (debug-friendly)
     if (req.path === "/api/health" || req.path === "/health") {
-      if (origin && originHost) setCors(res, origin);
+if (origin && originHost && allowed) setCors(res, origin);
+
       if (req.method === "OPTIONS") return res.status(204).end();
       return next();
     }
@@ -121,13 +122,17 @@ app.use(async (req, res, next) => {
         setCors(res, origin);
         return res.status(204).end();
       }
-      return res.status(403).end();
+return res.status(403).json({ ok:false, error:"CORS blocked: origin not allowed", domain: effectiveDomain });
+
     }
 
     // Normal calls: strict allowlist
     // If Origin exists -> use it. Otherwise fall back to Host (useful for server-to-server).
-    const domainToCheck = originHost || host;
-    const allowed = await isAllowedDomain(domainToCheck);
+const domainToCheck = originHost || null;
+    // If no Origin header (server-to-server), then fallback to Host
+const effectiveDomain = domainToCheck || host;
+const allowed = await isAllowedDomain(effectiveDomain);
+
 
     if (!allowed) {
       // Intentionally no CORS headers so browser treats it as blocked.
