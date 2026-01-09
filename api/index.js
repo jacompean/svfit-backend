@@ -11,6 +11,58 @@ const jwt = require("jsonwebtoken");
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+// --- CORS + Preflight (OPTIONS) ---
+// NOTE: this must run BEFORE your routes.
+
+function getOriginHost(origin) {
+  try {
+    if (!origin) return null;
+    return new URL(origin).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+async function isAllowedOriginHost(host) {
+  if (!host) return false;
+  const r = await pool.query(
+    `SELECT 1 FROM tenant_domains WHERE lower(domain)=lower($1) AND COALESCE(is_active,true)=true LIMIT 1`,
+    [host]
+  );
+  return r.rowCount > 0;
+}
+
+app.use(async (req, res, next) => {
+  const origin = req.headers.origin;
+  const originHost = getOriginHost(origin);
+
+  // Handle OPTIONS preflight for browser
+  if (req.method === "OPTIONS") {
+    const allowed = await isAllowedOriginHost(originHost);
+    if (allowed && origin) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      return res.status(204).end();
+    }
+    // If not allowed, return 403 (browser will block)
+    return res.status(403).end();
+  }
+
+  // For non-OPTIONS browser calls, set CORS headers when allowed
+  if (originHost && origin) {
+    const allowed = await isAllowedOriginHost(originHost);
+    if (allowed) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
+  }
+
+  return next();
+});
 
 // ------------------- DB -------------------
 const DATABASE_URL = process.env.DATABASE_URL;
