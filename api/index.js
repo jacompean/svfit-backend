@@ -18,7 +18,9 @@ app.use(async (req, res, next) => {
     if (req.path === '/api/health') return next();
 
     const origin = req.headers.origin || '';
-    if (!origin) {
+    const host = req.headers['x-forwarded-host'] || req.headers.host || '';
+    const tenantLookup = origin || host;
+    if (!tenantLookup) {
       // Browser requests should have Origin; for safety, block in production
       if ((process.env.NODE_ENV || 'production') === 'production') {
         return res.status(403).json({ ok: false, error: 'CORS blocked: missing origin' });
@@ -26,13 +28,13 @@ app.use(async (req, res, next) => {
       return next();
     }
 
-    const tenant = await resolveTenantFromOrigin(origin);
+    const tenant = await resolveTenantFromOrigin(tenantLookup);
     if (!tenant) {
       return res.status(403).json({ ok: false, error: 'CORS blocked: origin not configured' });
     }
 
     req.tenant = tenant;
-    req.originDomain = normalizeDomain(origin);
+    req.originDomain = normalizeDomain(tenantLookup);
     return next();
   } catch (e) {
     console.error(e);
