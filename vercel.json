@@ -1,12 +1,9 @@
 {
   "version": 2,
   "functions": {
-    "api/index.js": {
+    "api/[...path].js": {
       "runtime": "nodejs20.x",
       "maxDuration": 30
     }
-  },
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index.js" }
-  ]
+  }
 }
