@@ -107,8 +107,55 @@ app.use(async (req, res, next) => {
     json(res, 500, { ok: false, error: "Server error" });
   }
 });
+function requireAuth(req, res, next) {
+  try {
+    const h = req.headers.authorization || "";
+    const token = h.startsWith("Bearer ") ? h.slice(7) : null;
+    if (!token) return res.status(401).json({ ok: false, error: "Missing token" });
+
+    const secret = process.env.JWT_SECRET;
+    if (!secret) return res.status(500).json({ ok: false, error: "Missing JWT_SECRET" });
+
+    const payload = jwt.verify(token, secret);
+    req.user = payload; // { sub, role, tenant_id, ... }
+    return next();
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: "Invalid token" });
+  }
+}
 
 // ---- base ----
+app.get(
+  ["/me", "/api/me", "/auth/me", "/api/auth/me"],
+  requireAuth,
+  async (req, res) => {
+    try {
+      const idCode = req.user?.sub;
+      const r = await pool.query(
+        `SELECT id_code, role, tenant_id, is_active
+         FROM users
+         WHERE id_code=$1
+         LIMIT 1`,
+        [idCode]
+      );
+
+      if (r.rowCount === 0) return res.status(404).json({ ok: false, error: "User not found" });
+
+      const u = r.rows[0];
+      return res.json({
+        ok: true,
+        user: {
+          id_code: u.id_code,
+          role: u.role,
+          tenant_id: u.tenant_id
+        }
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: "Failed to load session" });
+    }
+  }
+);
+
 app.get(["/health", "/api/health"], (req, res) => json(res, 200, { ok: true, ts: new Date().toISOString() }));
 
 app.get(["/tenant", "/api/tenant"], (req, res) => {
