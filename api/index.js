@@ -205,6 +205,10 @@ app.get(["/me", "/api/me"], requireAuth, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Failed to load session" });
   }
 });
+// TEMP: detect if routing reaches Express for auth paths
+app.get(["/auth/login", "/api/auth/login"], (req, res) => {
+  return res.status(405).json({ ok: false, error: "Use POST for login", path: req.path });
+});
 
 // default
 app.all("*", (req, res) => {
